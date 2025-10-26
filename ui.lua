@@ -864,6 +864,11 @@ ui:SetScript("OnUpdate", function()
 			end
 		end
 	end
+
+	-- Tick energy overlay (debug-enabled)
+	if Cursive.UpdateEnergyOverlayTick then
+		Cursive.UpdateEnergyOverlayTick()
+	end
 end)
 
 function BuildClearerDruidUIAddon()
@@ -956,6 +961,14 @@ function BuildClearerDruidUIAddon()
 			r, g, b = 1, 0.8, 0.3
 		end
 		return r, g, b
+	end
+
+	local function formatRemainingTime(seconds)
+		if not seconds then return "" end
+		if Cursive and Cursive.db and Cursive.db.profile and Cursive.db.profile.curseshowdecimals and seconds < 10 then
+			return tostring(math.floor(seconds * 10) / 10)
+		end
+		return tostring(math.ceil(seconds))
 	end
 
 	local function updateRake()
@@ -1056,21 +1069,42 @@ function BuildClearerDruidUIAddon()
 	local TF_IDS = {
 		[5217] = true, [6793] = true, [9845] = true, [9846] = true
 	}
+	local TF_DURATIONS = {
+		[5217] = 18, [6793] = 18, [9845] = 18, [9846] = 18
+	}
 
 	local function playerHasTigersFury()
 		for i = 1, 64 do
 			local _, _, spellID = UnitBuff("player", i)
 			if not spellID then break end
-			if TF_IDS[spellID] then return true end
+			if TF_IDS[spellID] then return true, spellID end
 		end
-		return false
+		return false, nil
 	end
 
+	-- Track TF start time to render a countdown
+	addon._tfActiveSpellID = addon._tfActiveSpellID or nil
+	addon._tfStart = addon._tfStart or 0
+	addon._tfDuration = addon._tfDuration or 0
+
 	local function updateTF()
-		if playerHasTigersFury() then
-			-- We likely don't have duration data; show active state only
-			setIconVisual(tfPath, 1.0, "")
+		local active, spellID = playerHasTigersFury()
+		local now = GetTime()
+		if active and spellID then
+			-- Initialize on first detection or rank change
+			if addon._tfActiveSpellID ~= spellID or (now - (addon._tfStart or 0)) > (addon._tfDuration or 0) then
+				addon._tfActiveSpellID = spellID
+				addon._tfDuration = TF_DURATIONS[spellID] or 6
+				addon._tfStart = now
+			end
+			local remaining = (addon._tfStart + addon._tfDuration) - now
+			if remaining < 0 then remaining = 0 end
+			local r, g, b = colorForRemaining(remaining)
+			setIconVisual(tfPath, 1.0, formatRemainingTime(remaining), r, g, b)
 		else
+			addon._tfActiveSpellID = nil
+			addon._tfDuration = 0
+			addon._tfStart = 0
 			setIconVisual(tfPath, 0.3, "")
 		end
 	end
@@ -1153,24 +1187,7 @@ SlashCmdList["FERALDEBUFFTRACKER"] = function(msg)
 	end
 end
 
--- Ensure Core.lua has run and frame exists
--- if not addon then
--- 	DEFAULT_CHAT_FRAME:AddMessage("Cursive: FeralDebuffTracker frame not found, delaying UI creation...")
--- 	-- If frame isn't ready yet, wait until VARIABLES_LOADED
--- 	local temp = CreateFrame("Frame")
--- 	temp:RegisterEvent("VARIABLES_LOADED")
--- 	temp:SetScript("OnEvent", function()
--- 		temp:UnregisterAllEvents()
--- 		-- Run icon creation again now that frame exists
--- 		BuildClearerDruidUIAddon()
--- 	end)
--- else
--- DEFAULT_CHAT_FRAME:AddMessage("Cursive: FeralDebuffTracker frame found, creating UI...")
--- BuildClearerDruidUIAddon()
--- end
-
 function addon:RemoveDebuff(name)
-	DEFAULT_CHAT_FRAME:AddMessage("FDT: RemoveDebuff called for " .. name)
 	local d = activeDebuffs[name]; if not d then return end
 	getglobal(debuffs[d.texture]):SetAlpha(0.3)
 	getglobal(timers[d.texture]):SetText("")
@@ -1179,20 +1196,12 @@ function addon:RemoveDebuff(name)
 end
 
 function addon:RegisterDebuff(name)
-	DEFAULT_CHAT_FRAME:AddMessage("FDT: RegisterDebuff called for " .. name)
-
 	local key = (name == "Pounce Bleed") and "Pounce" or
 			(name == "Faerie Fire (Feral)" and "FF" or (name == "Tiger's Fury" and "TF" or name))
 
-
-	DEFAULT_CHAT_FRAME:AddMessage("FDT: RegisterDebuff key is " .. key)
-
 	local tex = iconPaths[key]; if not tex then return end
 
-
-	DEFAULT_CHAT_FRAME:AddMessage("FDT: RegisterDebuff texture is " .. tex)
 	local duration = durations[name] or 10
-	DEFAULT_CHAT_FRAME:AddMessage("FDT: RegisterDebuff duration is " .. duration)
 	local combo = addon.lastNonZeroComboPoints or addon.lastKnownComboPoints or 0
 	if name == "Rip" then
 		if combo == 1 then duration = 10 elseif combo == 2 then duration = 12 elseif combo == 3 then duration = 14 elseif combo == 4 then duration = 16 elseif combo >= 5 then duration = 18 end
@@ -1244,3 +1253,89 @@ end
 BuildClearerDruidUIAddon()
 
 Cursive.ui = ui
+
+do
+	local function CreateEnergyOverlay()
+		if ui.energyOverlay then return end
+
+		local overlay = CreateFrame("Frame", "CursiveEnergyOverlay", UIParent)
+		overlay:SetAllPoints(UIParent)
+		overlay:SetFrameStrata("FULLSCREEN_DIALOG")
+		overlay:EnableMouse(false)
+
+		overlay.textures = {}
+
+		local function addEdge(where)
+			local t = overlay:CreateTexture(nil, "OVERLAY")
+			t:SetTexture(1, 1, 1, 1)
+			if where == "LEFT" then
+				t:SetPoint("TOPLEFT", overlay, "TOPLEFT", 0, 0)
+				t:SetPoint("BOTTOMLEFT", overlay, "BOTTOMLEFT", 0, 0)
+				t:SetWidth(64)
+				t:SetGradientAlpha("HORIZONTAL", 1, 1, 1, 0.35, 1, 1, 1, 0)
+			elseif where == "RIGHT" then
+				t:SetPoint("TOPRIGHT", overlay, "TOPRIGHT", 0, 0)
+				t:SetPoint("BOTTOMRIGHT", overlay, "BOTTOMRIGHT", 0, 0)
+				t:SetWidth(64)
+				t:SetGradientAlpha("HORIZONTAL", 1, 1, 1, 0, 1, 1, 1, 0.35)
+			elseif where == "TOP" then
+				t:SetPoint("TOPLEFT", overlay, "TOPLEFT", 0, 0)
+				t:SetPoint("TOPRIGHT", overlay, "TOPRIGHT", 0, 0)
+				t:SetHeight(64)
+				-- Reverse so most white is at the screen edge (top), fading toward center
+				t:SetGradientAlpha("VERTICAL", 1, 1, 1, 0, 1, 1, 1, 0.35)
+			elseif where == "BOTTOM" then
+				t:SetPoint("BOTTOMLEFT", overlay, "BOTTOMLEFT", 0, 0)
+				t:SetPoint("BOTTOMRIGHT", overlay, "BOTTOMRIGHT", 0, 0)
+				t:SetHeight(64)
+				-- Reverse so most white is at the screen edge (bottom), fading toward center
+				t:SetGradientAlpha("VERTICAL", 1, 1, 1, 0.35, 1, 1, 1, 0)
+			end
+			table.insert(overlay.textures, t)
+		end
+
+		addEdge("LEFT")
+		addEdge("RIGHT")
+		addEdge("TOP")
+		addEdge("BOTTOM")
+
+		overlay:Hide()
+		ui.energyOverlay = overlay
+	end
+
+	local function UpdateEnergyOverlay()
+		if not ui.energyOverlay then return end
+
+		local pType = UnitPowerType("player")
+		if pType ~= 3 then
+			if ui.energyOverlayVisible then
+				ui.energyOverlay:Hide()
+				ui.energyOverlayVisible = false
+			end
+			return
+		end
+
+		local energy = UnitMana("player") or 0
+		local shouldShow = energy < (ui.energyThreshold or 17)
+
+		if shouldShow and not ui.energyOverlayVisible then
+			ui.energyOverlay:Show()
+			ui.energyOverlayVisible = true
+		elseif (not shouldShow) and ui.energyOverlayVisible then
+			ui.energyOverlay:Hide()
+			ui.energyOverlayVisible = false
+		end
+	end
+
+	CreateEnergyOverlay()
+	ui.energyOverlayThrottle = 0.2
+	ui.energyOverlayNext = 0
+	ui.energyThreshold = ui.energyThreshold or 30
+
+	function Cursive.UpdateEnergyOverlayTick()
+		local now = GetTime()
+		if now < (ui.energyOverlayNext or 0) then return end
+		ui.energyOverlayNext = now + (ui.energyOverlayThrottle or 0.2)
+		UpdateEnergyOverlay()
+	end
+end
