@@ -8,16 +8,21 @@ local utils = Cursive.utils
 local filter = Cursive.filter
 
 local ui = CreateFrame("Frame", "CursiveUI", UIParent)
+local addon = getglobal("AddonFrame")
 
 ui.border = {
 	edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-	tile = true, tileSize = 16, edgeSize = 8,
+	tile = true,
+	tileSize = 16,
+	edgeSize = 8,
 	insets = { left = 2, right = 2, top = 2, bottom = 2 }
 }
 
 ui.background = {
 	bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-	tile = true, tileSize = 16, edgeSize = 8,
+	tile = true,
+	tileSize = 16,
+	edgeSize = 8,
 	insets = { left = 0, right = 0, top = 0, bottom = 0 }
 }
 
@@ -301,7 +306,7 @@ local function CreateBarFirstSection(unitFrame, guid)
 		-- Normal positioning (leftmost)
 		firstSection:SetPoint("LEFT", unitFrame, "LEFT", 0, 0)
 	end
-	
+
 	firstSection:SetWidth(GetBarFirstSectionWidth())
 	firstSection:SetHeight(config.height)
 	firstSection:EnableMouse(false)
@@ -350,7 +355,7 @@ local function CreateBarSecondSection(unitFrame, guid)
 		-- Normal positioning relative to first section
 		secondSection:SetPoint("LEFT", unitFrame.firstSection, "RIGHT", 0, 0)
 	end
-	
+
 	secondSection:SetWidth(GetBarSecondSectionWidth())
 	secondSection:SetHeight(config.height)
 	unitFrame.secondSection = secondSection
@@ -431,7 +436,7 @@ local function CreateBarThirdSection(unitFrame, guid)
 		-- Normal positioning relative to second section
 		thirdSection:SetPoint("LEFT", unitFrame.secondSection, "RIGHT", 0, 0)
 	end
-	
+
 	thirdSection:SetWidth(GetBarThirdSectionWidth())
 	thirdSection:SetHeight(config.height)
 	thirdSection:EnableMouse(false)
@@ -859,7 +864,383 @@ ui:SetScript("OnUpdate", function()
 			end
 		end
 	end
-
 end)
+
+function BuildClearerDruidUIAddon()
+	-- local addon = FeralDebuffTracker
+	local frame = addon
+	if not frame then return end
+
+	DEFAULT_CHAT_FRAME:AddMessage("Cursive: FeralDebuffTracker UI Rebuild...")
+
+	addon.iconPaths = {
+		Pounce = "Interface\\Icons\\Ability_Druid_SupriseAttack",
+		Rake   = "Interface\\Icons\\Ability_Druid_Disembowel",
+		Rip    = "Interface\\Icons\\Ability_GhoulFrenzy",
+		FF     = "Interface\\Icons\\Spell_Nature_FaerieFire",
+		TF     = "Interface\\Icons\\Ability_Druid_TigersRoar",
+	}
+
+	addon.debuffs, addon.timers, addon.cpTexts = {}, {}, {}
+	local last
+	for _, key in ipairs({ "Pounce", "Rake", "Rip", "FF", "TF" }) do
+		local path = addon.iconPaths[key]
+		local tex = frame:CreateTexture("FeralDebuffTracker_" .. key, "ARTWORK")
+		tex:SetWidth(40)
+		tex:SetHeight(40)
+		if not last then
+			tex:SetPoint("LEFT", frame, "LEFT", 6, 0)
+		else
+			tex:SetPoint("LEFT", last, "RIGHT", 10, 0)
+		end
+		tex:SetTexture(path)
+		tex:SetAlpha(0.3)
+
+		local text = frame:CreateFontString("FeralDebuffTracker_" .. key .. "_Timer", "OVERLAY", "GameFontNormal")
+		text:SetPoint("CENTER", tex, "CENTER")
+		text:SetFont("Fonts\\FRIZQT__.TTF", 20, "OUTLINE")
+
+		local cpText = frame:CreateFontString("FeralDebuffTracker_" .. key .. "_CP", "OVERLAY", "GameFontNormalSmall")
+		cpText:SetPoint("BOTTOM", tex, "BOTTOM", 0, -2)
+		cpText:SetFont("Fonts\\FRIZQT__.TTF", 13, "OUTLINE")
+
+		addon.debuffs[path], addon.timers[path], addon.cpTexts[path] =
+				tex:GetName(), text:GetName(), cpText:GetName()
+		last = tex
+		addon:Show()
+	end
+
+	-- Lightweight per-frame updater for FDT icons driven by Cursive's data
+	-- Only reflects the player's current target (except TF which tracks player buff)
+	local rakeKey = "Rake"
+	local rakePath = addon.iconPaths[rakeKey]
+	local ripKey = "Rip"
+	local ripPath = addon.iconPaths[ripKey]
+	local pounceKey = "Pounce"
+	local pouncePath = addon.iconPaths[pounceKey]
+	local ffKey = "FF"
+	local ffPath = addon.iconPaths[ffKey]
+	local tfKey = "TF"
+	local tfPath = addon.iconPaths[tfKey]
+	addon._rakeUpdateThrottle = 0.1
+	addon._rakeNextTick = 0
+
+	local function setIconVisual(path, alpha, text, colorR, colorG, colorB)
+		if not path then return end
+		local iconName = addon.debuffs[path]
+		local timerName = addon.timers[path]
+		if not iconName or not timerName then return end
+
+		local icon = getglobal(iconName)
+		local timer = getglobal(timerName)
+		if not icon or not timer then return end
+
+		icon:SetAlpha(alpha or 0.3)
+		if text and text ~= "" then
+			if colorR and colorG and colorB then
+				timer:SetTextColor(colorR, colorG, colorB)
+			else
+				timer:SetTextColor(1, 1, 1)
+			end
+			timer:SetText(text)
+		else
+			timer:SetText("")
+		end
+	end
+
+	local function colorForRemaining(remaining)
+		local r, g, b = 1, 1, 1
+		if remaining <= 3 then
+			r, g, b = 1, 0.3, 0.3
+		elseif remaining <= 6 then
+			r, g, b = 1, 0.8, 0.3
+		end
+		return r, g, b
+	end
+
+	local function updateRake()
+		-- Resolve current target GUID using the same pattern used elsewhere in this addon
+		local _, targetGuid = UnitExists("target")
+		if not targetGuid or targetGuid == 0 then
+			setIconVisual(rakePath, 0.3, "")
+			return
+		end
+
+		-- Use Cursive's curse tracking to find Rake applied by the player
+		local rakeName = L["rake"]
+		local curseData = Cursive.curses and Cursive.curses:GetCurseData(rakeName, targetGuid)
+		if curseData and curseData.currentPlayer then
+			local remaining = Cursive.curses:TimeRemaining(curseData)
+			if remaining and remaining > 0 then
+				-- Color thresholds similar to existing visuals (<=3 red, <=6 yellow, else white)
+				local r, g, b = colorForRemaining(remaining)
+				-- TimeRemaining already respects decimal preference (curseshowdecimals)
+				setIconVisual(rakePath, 1.0, tostring(remaining), r, g, b)
+				return
+			end
+		end
+
+		-- No valid Rake on target (or expired)
+		setIconVisual(rakePath, 0.3, "")
+	end
+
+	local function updateRip()
+		local _, targetGuid = UnitExists("target")
+		if not targetGuid or targetGuid == 0 then
+			setIconVisual(ripPath, 0.3, "")
+			return
+		end
+
+		local ripName = L["rip"]
+		local curseData = Cursive.curses and Cursive.curses:GetCurseData(ripName, targetGuid)
+		if curseData and curseData.currentPlayer then
+			local remaining = Cursive.curses:TimeRemaining(curseData)
+			if remaining and remaining > 0 then
+				local r, g, b = colorForRemaining(remaining)
+				setIconVisual(ripPath, 1.0, tostring(remaining), r, g, b)
+				return
+			end
+		end
+
+		setIconVisual(ripPath, 0.3, "")
+	end
+
+	local function updatePounce()
+		local _, targetGuid = UnitExists("target")
+		if not targetGuid or targetGuid == 0 then
+			setIconVisual(pouncePath, 0.3, "")
+			return
+		end
+
+		local pounceName = L["pounce bleed"]
+		local curseData = Cursive.curses and Cursive.curses:GetCurseData(pounceName, targetGuid)
+		if curseData and curseData.currentPlayer then
+			local remaining = Cursive.curses:TimeRemaining(curseData)
+			if remaining and remaining > 0 then
+				local r, g, b = colorForRemaining(remaining)
+				setIconVisual(pouncePath, 1.0, tostring(remaining), r, g, b)
+				return
+			end
+		end
+
+		setIconVisual(pouncePath, 0.3, "")
+	end
+
+	local function updateFF()
+		local _, targetGuid = UnitExists("target")
+		if not targetGuid or targetGuid == 0 then
+			setIconVisual(ffPath, 0.3, "")
+			return
+		end
+
+		-- Show FF if any Faerie Fire is present (shared debuff included), timer when data available
+		local ffName = L["faerie fire"]
+		local hasFF = Cursive.curses and Cursive.curses:HasCurse(ffName, targetGuid, 0)
+		if hasFF then
+			local curseData = Cursive.curses:GetCurseData(ffName, targetGuid)
+			if curseData then
+				local remaining = Cursive.curses:TimeRemaining(curseData)
+				local r, g, b = colorForRemaining(remaining)
+				setIconVisual(ffPath, 1.0, tostring(remaining), r, g, b)
+			else
+				-- No timing data; still light the icon
+				setIconVisual(ffPath, 1.0, "")
+			end
+			return
+		end
+
+		setIconVisual(ffPath, 0.3, "")
+	end
+
+	-- Known Tiger's Fury spell IDs in classic-era (may differ on Turtle WoW)
+	local TF_IDS = {
+		[5217] = true, [6793] = true, [9845] = true, [9846] = true
+	}
+
+	local function playerHasTigersFury()
+		for i = 1, 64 do
+			local _, _, spellID = UnitBuff("player", i)
+			if not spellID then break end
+			if TF_IDS[spellID] then return true end
+		end
+		return false
+	end
+
+	local function updateTF()
+		if playerHasTigersFury() then
+			-- We likely don't have duration data; show active state only
+			setIconVisual(tfPath, 1.0, "")
+		else
+			setIconVisual(tfPath, 0.3, "")
+		end
+	end
+
+	-- Attach a dedicated OnUpdate to the addon frame to drive only the FDT icons
+	addon:SetScript("OnUpdate", function()
+		local now = GetTime()
+		if now < (addon._rakeNextTick or 0) then return end
+		addon._rakeNextTick = now + (addon._rakeUpdateThrottle or 0.1)
+		updateRake()
+		updateRip()
+		updatePounce()
+		updateFF()
+		updateTF()
+	end)
+end
+
+function addon:LoadPosition()
+	if FeralDebuffTrackerDB and FeralDebuffTrackerDB.point then
+		local f = self.frame
+		f:ClearAllPoints()
+		f:SetPoint(FeralDebuffTrackerDB.point, UIParent,
+			FeralDebuffTrackerDB.relPoint,
+			FeralDebuffTrackerDB.x, FeralDebuffTrackerDB.y)
+	end
+end
+
+function addon:Lock()
+	self.frame:SetBackdropColor(0, 0, 0, 0)
+	self.frame:SetBackdropBorderColor(0, 0, 0, 0)
+	self.frame:EnableMouse(false)
+	self.frame:SetBackdrop(nil)
+	FeralDebuffTrackerDB = FeralDebuffTrackerDB or {}
+	FeralDebuffTrackerDB.locked = true
+	DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00FeralDebuffTracker locked.|r")
+end
+
+function addon:Unlock()
+	self.frame:SetBackdropColor(1, 1, 1, 0.1)
+	self.frame:SetBackdropBorderColor(1, 1, 1, 0.2)
+	self.frame:EnableMouse(true)
+	self.frame:SetBackdrop({
+		bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+		edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+		tile = true,
+		tileSize = 16,
+		edgeSize = 16,
+		insets = { left = 2, right = 2, top = 2, bottom = 2 },
+	})
+	FeralDebuffTrackerDB = FeralDebuffTrackerDB or {}
+	FeralDebuffTrackerDB.locked = false
+	DEFAULT_CHAT_FRAME:AddMessage("|cffffff00FeralDebuffTracker unlocked. Drag to move.|r")
+end
+
+function FeralDebuffTracker_OnMouseDown(this, button)
+	if button == "LeftButton" and (not FeralDebuffTrackerDB or not FeralDebuffTrackerDB.locked) then this:StartMoving() end
+end
+
+function FeralDebuffTracker_OnMouseUp(this)
+	this:StopMovingOrSizing()
+	if this:IsMouseEnabled() then
+		local point, _, relPoint, xOfs, yOfs = this:GetPoint()
+		FeralDebuffTrackerDB = FeralDebuffTrackerDB or {}
+		FeralDebuffTrackerDB.point, FeralDebuffTrackerDB.relPoint = point, relPoint
+		FeralDebuffTrackerDB.x, FeralDebuffTrackerDB.y = xOfs, yOfs
+	end
+end
+
+SLASH_FERALDEBUFFTRACKER1 = "/fdt"
+SlashCmdList["FERALDEBUFFTRACKER"] = function(msg)
+	msg = string.lower(msg or "")
+	if msg == "lock" then
+		addon:Lock()
+	elseif msg == "unlock" then
+		addon:Unlock()
+	else
+		DEFAULT_CHAT_FRAME:AddMessage("|cffffcc00Feral Debuff Tracker commands:|r")
+		DEFAULT_CHAT_FRAME:AddMessage("/fdt lock   - Lock frame")
+		DEFAULT_CHAT_FRAME:AddMessage("/fdt unlock - Unlock frame")
+	end
+end
+
+-- Ensure Core.lua has run and frame exists
+-- if not addon then
+-- 	DEFAULT_CHAT_FRAME:AddMessage("Cursive: FeralDebuffTracker frame not found, delaying UI creation...")
+-- 	-- If frame isn't ready yet, wait until VARIABLES_LOADED
+-- 	local temp = CreateFrame("Frame")
+-- 	temp:RegisterEvent("VARIABLES_LOADED")
+-- 	temp:SetScript("OnEvent", function()
+-- 		temp:UnregisterAllEvents()
+-- 		-- Run icon creation again now that frame exists
+-- 		BuildClearerDruidUIAddon()
+-- 	end)
+-- else
+-- DEFAULT_CHAT_FRAME:AddMessage("Cursive: FeralDebuffTracker frame found, creating UI...")
+-- BuildClearerDruidUIAddon()
+-- end
+
+function addon:RemoveDebuff(name)
+	DEFAULT_CHAT_FRAME:AddMessage("FDT: RemoveDebuff called for " .. name)
+	local d = activeDebuffs[name]; if not d then return end
+	getglobal(debuffs[d.texture]):SetAlpha(0.3)
+	getglobal(timers[d.texture]):SetText("")
+	getglobal(cpTexts[d.texture]):SetText("")
+	activeDebuffs[name] = nil
+end
+
+function addon:RegisterDebuff(name)
+	DEFAULT_CHAT_FRAME:AddMessage("FDT: RegisterDebuff called for " .. name)
+
+	local key = (name == "Pounce Bleed") and "Pounce" or
+			(name == "Faerie Fire (Feral)" and "FF" or (name == "Tiger's Fury" and "TF" or name))
+
+
+	DEFAULT_CHAT_FRAME:AddMessage("FDT: RegisterDebuff key is " .. key)
+
+	local tex = iconPaths[key]; if not tex then return end
+
+
+	DEFAULT_CHAT_FRAME:AddMessage("FDT: RegisterDebuff texture is " .. tex)
+	local duration = durations[name] or 10
+	DEFAULT_CHAT_FRAME:AddMessage("FDT: RegisterDebuff duration is " .. duration)
+	local combo = addon.lastNonZeroComboPoints or addon.lastKnownComboPoints or 0
+	if name == "Rip" then
+		if combo == 1 then duration = 10 elseif combo == 2 then duration = 12 elseif combo == 3 then duration = 14 elseif combo == 4 then duration = 16 elseif combo >= 5 then duration = 18 end
+	end
+	activeDebuffs[name] = { expire = GetTime() + duration, texture = tex, comboPoints = combo, isPlayerBuff = (name == "Tiger's Fury") }
+
+	getglobal(debuffs[tex]):SetAlpha(1)
+	getglobal(timers[tex]):SetText(string.format("%d", duration))
+
+	if name == "Rip" and combo > 0 then
+		local cp = getglobal(cpTexts[tex])
+		local r, g, b = 1, 1, 1
+		if combo >= 5 then r, g, b = 0, 1, 0 elseif combo >= 3 then r, g, b = 1, 1, 0 else r, g, b = 1, 0.4, 0.4 end
+		cp:SetTextColor(r, g, b)
+		cp:SetText("CP:" .. combo)
+	end
+end
+
+function addon:RefreshIcons()
+	local now = GetTime()
+	for name, data in pairs(activeDebuffs) do
+		local remaining = data.expire - now
+		if remaining <= 0 then
+			addon:RemoveDebuff(name)
+		else
+			local secs = math.ceil(remaining)
+			getglobal(debuffs[data.texture]):SetAlpha(1)
+			local txt = getglobal(timers[data.texture])
+			if secs <= 3 then
+				txt:SetTextColor(1, 0.3, 0.3)
+			elseif secs <= 6 then
+				txt:SetTextColor(1, 0.8, 0.3)
+			else
+				txt:SetTextColor(1, 1, 1)
+			end
+			txt:SetText(secs)
+			if name == "Rip" and data.comboPoints > 0 then
+				local cp = getglobal(cpTexts[data.texture])
+				local c = data.comboPoints
+				local r, g, b = 1, 1, 1
+				if c >= 5 then r, g, b = 0, 1, 0 elseif c >= 3 then r, g, b = 1, 1, 0 else r, g, b = 1, 0.4, 0.4 end
+				cp:SetTextColor(r, g, b)
+				cp:SetText("CP:" .. c)
+			end
+		end
+	end
+end
+
+BuildClearerDruidUIAddon()
 
 Cursive.ui = ui
