@@ -983,6 +983,30 @@ function BuildClearerDruidUIAddon()
 
 	addon:RebuildIcons()
 
+	-- Helper: determine if player is a Druid in Cat Form (Lua 5.0/1.12 friendly)
+	local function PlayerInCatForm()
+		local _, class = UnitClass("player")
+		if class ~= "DRUID" then return false end
+		-- Classic-safe heuristic: Druids only have Energy in Cat Form
+		local pType = UnitPowerType("player")
+		return pType == 3
+	end
+
+	local function UpdateCatVisibility()
+		local unlocked = (not FeralDebuffTrackerDB) or (FeralDebuffTrackerDB.locked == false)
+		if unlocked then
+			if not addon:IsShown() then addon:Show() end
+			return true
+		end
+		if PlayerInCatForm() then
+			if not addon:IsShown() then addon:Show() end
+			return true
+		else
+			if addon:IsShown() then addon:Hide() end
+			return false
+		end
+	end
+
 	-- Lightweight per-frame updater for FDT icons driven by Cursive's data
 	-- Only reflects the player's current target (except TF which tracks player buff)
 	local rakeKey = "Rake"
@@ -1179,6 +1203,10 @@ function BuildClearerDruidUIAddon()
 
 	-- Attach a dedicated OnUpdate to the addon frame to drive only the FDT icons
 	addon:SetScript("OnUpdate", function()
+		-- Only show while in Cat Form (unless unlocked for repositioning)
+		if not UpdateCatVisibility() then
+			return
+		end
 		local now = GetTime()
 		if now < (addon._rakeNextTick or 0) then return end
 		addon._rakeNextTick = now + (addon._rakeUpdateThrottle or 0.1)
@@ -1187,6 +1215,19 @@ function BuildClearerDruidUIAddon()
 		updatePounce()
 		updateFF()
 		updateTF()
+	end)
+
+	-- Apply initial visibility right away
+	UpdateCatVisibility()
+
+	-- Ensure visibility can recover while hidden by listening to shapeshift/power changes
+	local catDriver = CreateFrame("Frame", "FDT_CatFormDriver", UIParent)
+	catDriver:RegisterEvent("UNIT_DISPLAYPOWER")
+	catDriver:RegisterEvent("PLAYER_AURAS_CHANGED")
+	catDriver:RegisterEvent("UPDATE_SHAPESHIFT_FORM")
+	catDriver:RegisterEvent("PLAYER_ENTERING_WORLD")
+	catDriver:SetScript("OnEvent", function()
+		UpdateCatVisibility()
 	end)
 end
 
