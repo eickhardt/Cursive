@@ -34,6 +34,7 @@ ui.row = 1
 ui.col = 1
 ui.maxBarsDisplayed = false
 ui.numDisplayed = 0
+ui.disableBars = true -- disable legacy Cursive unit bars; keep data systems active
 
 local function GetBarFirstSectionWidth()
 	local config = Cursive.db.profile
@@ -708,6 +709,25 @@ ui:SetScript("OnUpdate", function()
 		return
 	else
 		this.tick = GetTime() + 0.1
+	end
+
+	-- If bars are disabled, only tick optional helpers (e.g., energy overlay) and stop
+	if ui.disableBars then
+		-- one-time cleanup/hide any previously created bar frames
+		if not ui._barsHidden then
+			if ui.rootBarFrame then ui.rootBarFrame:Hide() end
+			for col, rows in pairs(ui.unitFrames) do
+				for row, unitFrame in pairs(rows) do
+					if unitFrame and unitFrame.Hide then unitFrame:Hide() end
+				end
+			end
+			ui._barsHidden = true
+		end
+
+		if Cursive.UpdateEnergyOverlayTick then
+			Cursive.UpdateEnergyOverlayTick()
+		end
+		return
 	end
 
 	if not ui.rootBarFrame then
