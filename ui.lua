@@ -9,6 +9,8 @@ local filter = Cursive.filter
 
 local ui = CreateFrame("Frame", "CursiveUI", UIParent)
 local addon = getglobal("AddonFrame")
+-- Ensure methods that expect self.frame work even if the frame itself is the addon
+if addon and not addon.frame then addon.frame = addon end
 
 ui.border = {
 	edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -899,41 +901,87 @@ function BuildClearerDruidUIAddon()
 	DEFAULT_CHAT_FRAME:AddMessage("Cursive: FeralDebuffTracker UI Rebuild...")
 
 	addon.iconPaths = {
+		TF     = "Interface\\Icons\\Ability_Druid_TigersRoar",
 		Pounce = "Interface\\Icons\\Ability_Druid_SupriseAttack",
 		Rake   = "Interface\\Icons\\Ability_Druid_Disembowel",
 		Rip    = "Interface\\Icons\\Ability_GhoulFrenzy",
 		FF     = "Interface\\Icons\\Spell_Nature_FaerieFire",
-		TF     = "Interface\\Icons\\Ability_Druid_TigersRoar",
 	}
 
+	-- Defaults for icon visibility (saved in profile when available)
+	local profile = Cursive and Cursive.db and Cursive.db.profile or nil
+	local defaultIcons = { Pounce = true, Rake = true, Rip = true, FF = true, TF = true }
+	if profile then
+		profile.fdt = profile.fdt or {}
+		profile.fdt.icons = profile.fdt.icons or defaultIcons
+	else
+		-- Profile not ready yet; keep defaults in-memory so UI can build without errors
+		addon._fdtDefaults = defaultIcons
+	end
+
 	addon.debuffs, addon.timers, addon.cpTexts = {}, {}, {}
-	local last
-	for _, key in ipairs({ "Pounce", "Rake", "Rip", "FF", "TF" }) do
-		local path = addon.iconPaths[key]
-		local tex = frame:CreateTexture("FeralDebuffTracker_" .. key, "ARTWORK")
-		tex:SetWidth(40)
-		tex:SetHeight(40)
-		if not last then
-			tex:SetPoint("LEFT", frame, "LEFT", 6, 0)
-		else
-			tex:SetPoint("LEFT", last, "RIGHT", 10, 0)
+	addon._iconOrder = { "Pounce", "Rake", "Rip", "FF", "TF" }
+
+	function addon:IsIconEnabled(key)
+		local profile = (Cursive and Cursive.db and Cursive.db.profile) or nil
+		local cfg = profile and profile.fdt and profile.fdt.icons
+		if not cfg then
+			cfg = addon._fdtDefaults
 		end
-		tex:SetTexture(path)
-		tex:SetAlpha(0.3)
+		return not cfg or cfg[key] ~= false
+	end
 
-		local text = frame:CreateFontString("FeralDebuffTracker_" .. key .. "_Timer", "OVERLAY", "GameFontNormal")
-		text:SetPoint("CENTER", tex, "CENTER")
-		text:SetFont("Fonts\\FRIZQT__.TTF", 20, "OUTLINE")
+	function addon:RebuildIcons()
+		-- Hide existing, re-anchor enabled ones left-to-right
+		local last
+		for _, key in ipairs(addon._iconOrder) do
+			local path = addon.iconPaths[key]
+			local texName = "FeralDebuffTracker_" .. key
+			local timerName = texName .. "_Timer"
+			local cpName = texName .. "_CP"
 
-		local cpText = frame:CreateFontString("FeralDebuffTracker_" .. key .. "_CP", "OVERLAY", "GameFontNormalSmall")
-		cpText:SetPoint("BOTTOM", tex, "BOTTOM", 0, -2)
-		cpText:SetFont("Fonts\\FRIZQT__.TTF", 13, "OUTLINE")
+			local tex = getglobal(texName)
+			if not tex then
+				tex = frame:CreateTexture(texName, "ARTWORK")
+				tex:SetWidth(40); tex:SetHeight(40)
+				tex:SetTexture(path)
+			end
+			tex:ClearAllPoints()
+			if not last then
+				tex:SetPoint("LEFT", frame, "LEFT", 6, 0)
+			else
+				tex:SetPoint("LEFT", last, "RIGHT", 10, 0)
+			end
+			tex:SetAlpha(0.3)
 
-		addon.debuffs[path], addon.timers[path], addon.cpTexts[path] =
-				tex:GetName(), text:GetName(), cpText:GetName()
-		last = tex
+			local timer = getglobal(timerName)
+			if not timer then
+				timer = frame:CreateFontString(timerName, "OVERLAY", "GameFontNormal")
+				timer:SetFont("Fonts\\FRIZQT__.TTF", 20, "OUTLINE")
+			end
+			timer:ClearAllPoints(); timer:SetPoint("CENTER", tex, "CENTER")
+
+			local cp = getglobal(cpName)
+			if not cp then
+				cp = frame:CreateFontString(cpName, "OVERLAY", "GameFontNormalSmall")
+				cp:SetFont("Fonts\\FRIZQT__.TTF", 13, "OUTLINE")
+			end
+			cp:ClearAllPoints(); cp:SetPoint("BOTTOM", tex, "BOTTOM", 0, -2)
+
+			-- Map path to names for updater helpers
+			addon.debuffs[path], addon.timers[path], addon.cpTexts[path] = texName, timerName, cpName
+
+			-- Show or hide depending on config
+			if addon:IsIconEnabled(key) then
+				tex:Show(); timer:Show(); cp:Show(); last = tex
+			else
+				tex:Hide(); timer:Hide(); cp:Hide()
+			end
+		end
 		addon:Show()
 	end
+
+	addon:RebuildIcons()
 
 	-- Lightweight per-frame updater for FDT icons driven by Cursive's data
 	-- Only reflects the player's current target (except TF which tracks player buff)
@@ -1143,8 +1191,8 @@ function BuildClearerDruidUIAddon()
 end
 
 function addon:LoadPosition()
-	if FeralDebuffTrackerDB and FeralDebuffTrackerDB.point then
-		local f = self.frame
+	local f = self.frame or self
+	if FeralDebuffTrackerDB and FeralDebuffTrackerDB.point and f and f.ClearAllPoints then
 		f:ClearAllPoints()
 		f:SetPoint(FeralDebuffTrackerDB.point, UIParent,
 			FeralDebuffTrackerDB.relPoint,
@@ -1153,27 +1201,33 @@ function addon:LoadPosition()
 end
 
 function addon:Lock()
-	self.frame:SetBackdropColor(0, 0, 0, 0)
-	self.frame:SetBackdropBorderColor(0, 0, 0, 0)
-	self.frame:EnableMouse(false)
-	self.frame:SetBackdrop(nil)
+	local f = self.frame or self
+	if not f then return end
+	if f.SetBackdropColor then f:SetBackdropColor(0, 0, 0, 0) end
+	if f.SetBackdropBorderColor then f:SetBackdropBorderColor(0, 0, 0, 0) end
+	if f.EnableMouse then f:EnableMouse(false) end
+	if f.SetBackdrop then f:SetBackdrop(nil) end
 	FeralDebuffTrackerDB = FeralDebuffTrackerDB or {}
 	FeralDebuffTrackerDB.locked = true
 	DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00FeralDebuffTracker locked.|r")
 end
 
 function addon:Unlock()
-	self.frame:SetBackdropColor(1, 1, 1, 0.1)
-	self.frame:SetBackdropBorderColor(1, 1, 1, 0.2)
-	self.frame:EnableMouse(true)
-	self.frame:SetBackdrop({
-		bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-		edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-		tile = true,
-		tileSize = 16,
-		edgeSize = 16,
-		insets = { left = 2, right = 2, top = 2, bottom = 2 },
-	})
+	local f = self.frame or self
+	if not f then return end
+	if f.SetBackdropColor then f:SetBackdropColor(1, 1, 1, 0.1) end
+	if f.SetBackdropBorderColor then f:SetBackdropBorderColor(1, 1, 1, 0.2) end
+	if f.EnableMouse then f:EnableMouse(true) end
+	if f.SetBackdrop then
+		f:SetBackdrop({
+			bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+			edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+			tile = true,
+			tileSize = 16,
+			edgeSize = 16,
+			insets = { left = 2, right = 2, top = 2, bottom = 2 },
+		})
+	end
 	FeralDebuffTrackerDB = FeralDebuffTrackerDB or {}
 	FeralDebuffTrackerDB.locked = false
 	DEFAULT_CHAT_FRAME:AddMessage("|cffffff00FeralDebuffTracker unlocked. Drag to move.|r")
@@ -1196,14 +1250,81 @@ end
 SLASH_FERALDEBUFFTRACKER1 = "/fdt"
 SlashCmdList["FERALDEBUFFTRACKER"] = function(msg)
 	msg = string.lower(msg or "")
+	-- simple parser for show/hide/list
+	local function normalizeIconKey(s)
+		s = string.lower(s or "")
+		if s == "pounce" then return "Pounce" end
+		if s == "rake" then return "Rake" end
+		if s == "rip" then return "Rip" end
+		if s == "ff" or s == "faerie" or s == "faerie fire" or s == "faeriefire" then return "FF" end
+		if s == "tf" or s == "tiger" or s == "tigers fury" or s == "tiger's fury" or s == "tigersfury" then return "TF" end
+		return nil
+	end
+
+	-- Parse first word and the rest without relying on string.match (not available in Lua 5.0)
+	local cmd, arg
+	if msg == "" then
+		cmd, arg = "", ""
+	else
+		local s, e = string.find(msg, "%s+")
+		if s then
+			cmd = string.sub(msg, 1, s - 1)
+			arg = string.sub(msg, e + 1)
+		else
+			cmd = msg
+			arg = ""
+		end
+	end
+	if cmd == "show" or cmd == "hide" then
+		local key = normalizeIconKey(arg)
+		if key then
+			local profile = (Cursive and Cursive.db and Cursive.db.profile) or nil
+			if not profile then
+				if DEFAULT_CHAT_FRAME then
+					DEFAULT_CHAT_FRAME:AddMessage(
+						"FDT: configuration not ready yet. Try again after UI finishes loading.")
+				end
+				return
+			end
+			profile.fdt = profile.fdt or {}
+			profile.fdt.icons = profile.fdt.icons or { Pounce = true, Rake = true, Rip = true, FF = true, TF = true }
+			if cmd == "show" then
+				profile.fdt.icons[key] = true
+				if DEFAULT_CHAT_FRAME then DEFAULT_CHAT_FRAME:AddMessage("FDT: showing " .. key) end
+			else
+				profile.fdt.icons[key] = false
+				if DEFAULT_CHAT_FRAME then DEFAULT_CHAT_FRAME:AddMessage("FDT: hiding " .. key) end
+			end
+			if addon and addon.RebuildIcons then addon:RebuildIcons() end
+		else
+			if DEFAULT_CHAT_FRAME then
+				DEFAULT_CHAT_FRAME:AddMessage(
+					"FDT: unknown icon. Use one of: pounce, rake, rip, ff, tf")
+			end
+		end
+		return
+	elseif cmd == "list" then
+		local profile = (Cursive and Cursive.db and Cursive.db.profile) or nil
+		local cfg = (profile and profile.fdt and profile.fdt.icons) or addon._fdtDefaults or {}
+		local order = { "Pounce", "Rake", "Rip", "FF", "TF" }
+		for _, k in ipairs(order) do
+			local state = (cfg[k] ~= false) and "ON" or "OFF"
+			if DEFAULT_CHAT_FRAME then DEFAULT_CHAT_FRAME:AddMessage(string.format("FDT: %s = %s", k, state)) end
+		end
+		return
+	end
+
 	if msg == "lock" then
 		addon:Lock()
 	elseif msg == "unlock" then
 		addon:Unlock()
 	else
 		DEFAULT_CHAT_FRAME:AddMessage("|cffffcc00Feral Debuff Tracker commands:|r")
-		DEFAULT_CHAT_FRAME:AddMessage("/fdt lock   - Lock frame")
-		DEFAULT_CHAT_FRAME:AddMessage("/fdt unlock - Unlock frame")
+		DEFAULT_CHAT_FRAME:AddMessage("/fdt lock             - Lock frame")
+		DEFAULT_CHAT_FRAME:AddMessage("/fdt unlock           - Unlock frame")
+		DEFAULT_CHAT_FRAME:AddMessage("/fdt show <icon>      - Show icon (pounce/rake/rip/ff/tf)")
+		DEFAULT_CHAT_FRAME:AddMessage("/fdt hide <icon>      - Hide icon (pounce/rake/rip/ff/tf)")
+		DEFAULT_CHAT_FRAME:AddMessage("/fdt list             - List icon visibility")
 	end
 end
 
